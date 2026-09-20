@@ -26,9 +26,11 @@ from telegram.error import (
     TelegramError,
 )
 from telegram.ext import (
+    
     Application,
     CommandHandler,
     CallbackQueryHandler,
+    ChatJoinRequestHandler,
     MessageHandler,
     ConversationHandler,
     ContextTypes,
@@ -396,7 +398,18 @@ def init_db():
                     created_at TEXT
                 )
             """)
+            # ------------------------------------------------
+            # JOIN REQUESTS
+            # ------------------------------------------------
 
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS join_requests (
+                    user_id INTEGER NOT NULL,
+                    chat_id INTEGER NOT NULL,
+                    requested_at TEXT,
+                    PRIMARY KEY (user_id, chat_id)
+                )
+            """)
             # ------------------------------------------------
             # MIGRATIONS
             # ------------------------------------------------
@@ -1411,7 +1424,45 @@ def clear_subscription_cache(user_id=None):
         None,
     )
 
+async def handle_join_request(update, context):
+    request = update.chat_join_request
 
+    if not request:
+        return
+
+    user_id = request.from_user.id
+    chat_id = request.chat.id
+
+    try:
+        with sqlite3.connect(DATABASE) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO join_requests
+                (user_id, chat_id, requested_at)
+                VALUES (?, ?, ?)
+                """,
+                (
+                    user_id,
+                    chat_id,
+                    datetime.now().isoformat(),
+                ),
+            )
+            conn.commit()
+
+        clear_subscription_cache(user_id)
+
+        logger.info(
+            "Join request saved: user=%s chat=%s",
+            user_id,
+            chat_id,
+        )
+
+    except Exception:
+        logger.exception(
+            "Failed to save join request: user=%s chat=%s",
+            user_id,
+            chat_id,
+        )
 async def check_one_subscription(
     bot,
     user_id,
@@ -1419,6 +1470,30 @@ async def check_one_subscription(
 ):
 
     chat_id = channel["chat_id"]
+    
+        # Join Request yuborgan bo‘lsa,
+    # hali qabul qilinmagan bo‘lsa ham a'zo deb hisoblaymiz.
+    try:
+        with sqlite3.connect(DATABASE) as conn:
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM join_requests
+                WHERE user_id = ? AND chat_id = ?
+                LIMIT 1
+                """,
+                (user_id, chat_id),
+            ).fetchone()
+
+        if row:
+            return True, None
+
+    except Exception:
+        logger.exception(
+            "Failed to check join request: user=%s chat=%s",
+            user_id,
+            chat_id,
+        )
 
     try:
 
@@ -5079,6 +5154,12 @@ def main():
         .token(BOT_TOKEN)
         .concurrent_updates(False)
         .build()
+    )
+
+    application.add_handler(
+        ChatJoinRequestHandler(
+            handle_join_request
+        )
     )
 
     # ========================================================
